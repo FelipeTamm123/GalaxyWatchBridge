@@ -1,0 +1,81 @@
+# XcodeGen spec — generates GalaxyWatchBridge.xcodeproj from this file.
+#
+#   brew install xcodegen
+#   cd GalaxyWatchBridge && xcodegen generate && open GalaxyWatchBridge.xcodeproj
+#
+# Using XcodeGen instead of committing an .xcodeproj is a deliberate choice: project.pbxproj
+# is a generated-looking binary-ish blob that conflicts horribly in git. This YAML is
+# reviewable. Creating the project by hand in Xcode works just as well for a one-off — see
+# README.md.
+
+name: GalaxyWatchBridge
+
+options:
+  bundleIdPrefix: com.felipetamm
+  deploymentTarget:
+    iOS: "17.0" # @Observable and ContentUnavailableView both require iOS 17.
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    # Swift 5 language mode for the first build. The concurrency annotations in this
+    # project are written to be correct under Swift 6, but toolchain versions disagree on
+    # the details — get it running first, then flip this to 6.0 and fix what it reports.
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    # Leave DEVELOPMENT_TEAM empty and pick your team in Xcode's Signing & Capabilities
+    # tab. Hardcoding a team ID here breaks the project for anyone else who opens it.
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+
+targets:
+  GalaxyWatchBridge:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: GalaxyWatchBridge
+        excludes:
+          # Excluded from `sources` because it is consumed via INFOPLIST_FILE below.
+          # Leaving it in would also copy it into the bundle as a stray resource.
+          - "Resources/Info.plist"
+
+    settings:
+      base:
+        # Must be globally unique-ish. Change `felipetamm` to something of your own, or
+        # signing fails with "bundle identifier is not available".
+        PRODUCT_BUNDLE_IDENTIFIER: com.felipetamm.GalaxyWatchBridge
+        INFOPLIST_FILE: GalaxyWatchBridge/Resources/Info.plist
+        # Required when supplying a real Info.plist: Xcode 15+ defaults this to YES and
+        # synthesises its own plist from build settings, which then collides with ours.
+        GENERATE_INFOPLIST_FILE: NO
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: "1.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  GalaxyWatchBridgeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - GalaxyWatchBridgeTests
+    dependencies:
+      - target: GalaxyWatchBridge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.felipetamm.GalaxyWatchBridgeTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  GalaxyWatchBridge:
+    build:
+      targets:
+        GalaxyWatchBridge: all
+        GalaxyWatchBridgeTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - GalaxyWatchBridgeTests

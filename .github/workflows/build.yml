@@ -1,0 +1,112 @@
+name: Build iOS
+
+# Builds an UNSIGNED .ipa on a GitHub-hosted macOS runner.
+#
+# Why unsigned: signing in CI needs an Apple certificate and provisioning profile as
+# repository secrets. Sideloadly re-signs locally with your own free Apple ID anyway, so
+# shipping certificates into a PUBLIC repo would be all risk and no benefit.
+#
+# Download the artifact from the run's summary page, then install with Sideloadly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets you trigger a build by hand from the Actions tab without pushing a commit.
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight build of the same branch.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned .ipa
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Logged so the build record says which toolchain produced it. This project needs
+      # Xcode 16 or newer (Swift Testing, @retroactive, @Observable).
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build for device
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project GalaxyWatchBridge.xcodeproj \
+            -scheme GalaxyWatchBridge \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build
+
+      # An .ipa is just a zip with the .app inside a folder named Payload. Since the build
+      # is unsigned there is nothing for `xcodebuild -exportArchive` to do, so packaging by
+      # hand is both simpler and avoids needing an ExportOptions.plist.
+      - name: Package .ipa
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/GalaxyWatchBridge.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::No .app produced at $APP_PATH"
+            ls -R build/Build/Products || true
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry GalaxyWatchBridge.ipa Payload
+          echo "Packaged $(du -h GalaxyWatchBridge.ipa | cut -f1)"
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: GalaxyWatchBridge-unsigned-ipa
+          path: GalaxyWatchBridge.ipa
+          # Default is 90 days; a week is plenty for something rebuilt on every push.
+          retention-days: 7
+          if-no-files-found: error
+
+  test:
+    name: Unit tests
+    runs-on: macos-latest
+    # Independent of `build` on purpose: a failing test should not deny you the .ipa.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Printed so that if the destination below stops matching a real device, the log
+      # already tells us what to use instead.
+      - name: List available simulators
+        run: xcrun simctl list devices available
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project GalaxyWatchBridge.xcodeproj \
+            -scheme GalaxyWatchBridge \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO

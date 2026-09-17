@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  REQUIRED on iOS 13+. Omitting this key does not produce a build error or a runtime
+	  exception - the app simply crashes the first time CBCentralManager is instantiated,
+	  with a console message about a missing usage description. It is the single most
+	  common cause of "my BLE app dies on launch".
+
+	  The string is shown verbatim in the system permission prompt, so it must state a
+	  concrete reason. App Review rejects generic text like "This app uses Bluetooth".
+	-->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app uses Bluetooth to connect to your watch and read heart rate, step, and battery data.</string>
+
+	<!--
+	  Deprecated in iOS 13 but still read by iOS 12 and earlier. Harmless to keep, and the
+	  only way to support those releases.
+	-->
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>This app uses Bluetooth to connect to your watch and read heart rate, step, and battery data.</string>
+
+	<!--
+	  Background BLE. Required if you pass CBCentralManagerOptionRestoreIdentifierKey
+	  (see BLEManager.init(enableStateRestoration:)) or want to keep receiving
+	  notifications while backgrounded.
+
+	  Two constraints apply once backgrounded, and both surprise people:
+	    1. Only FILTERED scans work. scanForPeripherals(withServices: nil) silently returns
+	       nothing in the background - you must pass explicit service UUIDs.
+	    2. CBCentralManagerScanOptionAllowDuplicatesKey is ignored, so live RSSI stops
+	       updating.
+
+	  Remove this whole key if the app has no background requirement - declaring an unused
+	  background mode is an App Review rejection reason.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+
+	<!--
+	  BLE requires physical hardware. This prevents installation on devices without it and
+	  keeps the app off the Simulator, where CoreBluetooth reports .unsupported forever.
+	-->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+		<string>bluetooth-le</string>
+	</array>
+
+	<key>CFBundleDisplayName</key>
+	<string>Watch Bridge</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

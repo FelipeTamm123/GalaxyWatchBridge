@@ -1,0 +1,58 @@
+# ---------- Xcode ----------
+
+# The project file is GENERATED from project.yml by XcodeGen, so it is not tracked —
+# project.pbxproj conflicts horribly in git and there is no sane way to merge it.
+#
+# If you decide to build the project by hand in Xcode instead of using XcodeGen, delete
+# this line and commit the .xcodeproj: it then becomes the source of truth and losing it
+# means rebuilding the target settings from scratch.
+*.xcodeproj
+
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Signing material. Never commit these — a leaked .p12 lets anyone sign as you.
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+
+# ---------- Swift Package Manager ----------
+
+.build/
+.swiftpm/
+
+# ---------- Android / Wear OS ----------
+
+.gradle/
+local.properties
+*.iml
+.idea/
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Gradle wrapper jar is intentionally NOT ignored — it is required to build.
+
+# ---------- macOS ----------
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ---------- Editors ----------
+
+.vscode/
+*.swp
+*~
