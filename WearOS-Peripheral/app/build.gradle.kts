@@ -61,4 +61,6 @@ dependencies {
 
     implementation(libs.androidx.wear.compose.material)
     implementation(libs.androidx.wear.compose.foundation)
+
+    implementation(libs.androidx.health.services)
 }

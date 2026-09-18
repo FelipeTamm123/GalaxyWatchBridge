@@ -139,14 +139,22 @@ Length-prefixed frames, little-endian:
  4       n     payload
 ```
 
-Telemetry payload is a fixed 16 bytes (timestamp, HR, steps, battery, flags) — chosen to
-fit, with the 4-byte header, inside the **20-byte** default ATT payload, so a sample never
-needs fragmenting even before MTU negotiation. JSON would not fit; that is why this is
-binary.
+Telemetry payload is a fixed **28 bytes** — timestamp, heart rate, steps, calories,
+distance, battery, flags, and 4 reserved. JSON would be several times the size; that is why
+this is binary.
+
+Absent values use sentinels rather than zero (`0xFFFFFFFF`, `0xFF`), because zero is a
+legitimate reading for most fields — 0 steps at 6am is real data. Heart rate is the one
+exception: a live 0 BPM is not something the device reports, so 0 doubles as its sentinel.
+On-wrist is a tri-state, so "off wrist" stays distinct from "this watch has no off-body
+sensor".
 
 The length prefix is what makes `FrameReassembler` possible. BLE notifications are capped
 at `ATT_MTU - 3`, so a larger payload arrives as several packets with no framing of its
-own.
+own. At 32 bytes including the header, a sample now exceeds the 20-byte payload of an
+unnegotiated ATT MTU — iOS negotiates ~185 bytes on connect, and the reassembler covers
+the window before that. The original 16-byte layout fit in one packet unconditionally;
+that property is gone, which makes the reassembler load-bearing rather than defensive.
 
 ---
 
@@ -242,9 +250,15 @@ mode in this project. Generate a fresh set with `uuidgen` and change both.
 
 Deliberate omissions, so the gaps are visible rather than assumed:
 
-- **Real sensors.** `readSensors()` returns synthetic values. Wire up Health Services
-  (`androidx.health.services.client`) for HR and steps, `ACTION_BATTERY_CHANGED` for
-  battery, `TYPE_LOW_LATENCY_OFFBODY_DETECT` for on-wrist.
+- **Anything iOS does not expose to third parties.** Notification mirroring has no iOS
+  API at all (there is no `NotificationListenerService` equivalent; ANCS runs the other
+  way and needs system-level pairing, which is precisely what this watch cannot do), and
+  neither do call handling, message replies, or controlling another app's media playback.
+  Continuous background operation is also out: iOS suspends third-party apps, so the link
+  lives only while the app is open. These are platform limits, not gaps in the code.
+- **SpO2, sleep, and skin temperature.** Not wired up. Health Services exposes some of
+  these, but availability varies by device and Samsung restricts several — check
+  `MeasureClient.getCapabilitiesAsync()` on the target watch before adding fields.
 - **Pairing / bonding and encryption.** Characteristics use open permissions. Anything
   carrying health data should require `PERMISSION_READ_ENCRYPTED` and a bonded link.
 - **Persistence.** Telemetry is in-memory only; history is capped at 120 samples.

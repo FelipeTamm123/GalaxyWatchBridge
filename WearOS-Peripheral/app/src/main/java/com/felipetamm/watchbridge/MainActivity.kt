@@ -64,6 +64,16 @@ private fun requiredPermissions(): Array<String> = buildList {
         // runs, but there is no way to stop it from the watch.
         add(Manifest.permission.POST_NOTIFICATIONS)
     }
+
+    // Heart rate. Health Services' registerMeasureCallback fails without it — reported
+    // through onRegistrationFailed rather than thrown, so the app keeps running and simply
+    // never produces a reading.
+    add(Manifest.permission.BODY_SENSORS)
+
+    // Daily step, calorie and distance totals. Runtime permission from API 29 on.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        add(Manifest.permission.ACTIVITY_RECOGNITION)
+    }
 }.toTypedArray()
 
 private fun Context.hasAllPermissions(): Boolean =

@@ -27,14 +27,32 @@ struct TelemetryCardView: View {
                     value: packet.stepsText,
                     unit: "today",
                     symbol: "figure.walk",
-                    tint: .blue
+                    tint: .blue,
+                    isStale: packet.steps == nil
+                )
+                MetricTile(
+                    title: "Distance",
+                    value: packet.distanceText,
+                    unit: packet.distanceUnit,
+                    symbol: "point.topleft.down.curvedto.point.bottomright.up",
+                    tint: .teal,
+                    isStale: packet.distanceMeters == nil
+                )
+                MetricTile(
+                    title: "Calories",
+                    value: packet.caloriesText,
+                    unit: "kcal",
+                    symbol: "flame.fill",
+                    tint: .orange,
+                    isStale: packet.calories == nil
                 )
                 MetricTile(
                     title: "Battery",
                     value: packet.batteryText,
-                    unit: packet.isCharging ? "charging" : "remaining",
-                    symbol: packet.isCharging ? "battery.100.bolt" : batterySymbol,
-                    tint: batteryTint
+                    unit: batteryUnit,
+                    symbol: batterySymbol,
+                    tint: batteryTint,
+                    isStale: packet.batteryPercent == nil
                 )
             }
 
@@ -45,11 +63,13 @@ struct TelemetryCardView: View {
             }
 
             HStack(spacing: 10) {
-                if !packet.isOnWrist {
+                // `isOnWrist == false` specifically, not `!isOnWrist`: nil means the watch
+                // has no off-body sensor, which is not the same claim as "off wrist".
+                if packet.isOnWrist == false {
                     Badge(text: "Off wrist", tint: .orange)
                 }
-                if !packet.hasSensorContact {
-                    Badge(text: "No sensor contact", tint: .orange)
+                if !packet.hasHeartRateSensor {
+                    Badge(text: "No HR sensor", tint: .orange)
                 }
                 Spacer(minLength: 0)
                 Text(packet.timestamp, format: .dateTime.hour().minute().second())
@@ -61,20 +81,28 @@ struct TelemetryCardView: View {
         .padding(.vertical, 6)
     }
 
+    private var batteryUnit: String {
+        guard packet.batteryPercent != nil else { return "unknown" }
+        return packet.isCharging ? "charging" : "remaining"
+    }
+
     private var batterySymbol: String {
-        switch packet.batteryPercent {
-        case 75...: "battery.100"
-        case 40..<75: "battery.75"
-        case 15..<40: "battery.25"
-        default: "battery.0"
+        guard let percent = packet.batteryPercent else { return "battery.0" }
+        if packet.isCharging { return "battery.100.bolt" }
+        switch percent {
+        case 75...: return "battery.100"
+        case 40..<75: return "battery.75"
+        case 15..<40: return "battery.25"
+        default: return "battery.0"
         }
     }
 
     private var batteryTint: Color {
-        switch packet.batteryPercent {
-        case 40...: .green
-        case 15..<40: .orange
-        default: .red
+        guard let percent = packet.batteryPercent else { return .secondary }
+        switch percent {
+        case 40...: return .green
+        case 15..<40: return .orange
+        default: return .red
         }
     }
 }
@@ -95,16 +123,20 @@ private struct MetricTile: View {
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(tint)
                 .labelStyle(.titleAndIcon)
+                .lineLimit(1)
 
             Text(value)
                 .font(.title2.weight(.semibold))
                 .monospacedDigit()
                 .foregroundStyle(isStale ? .secondary : .primary)
                 .contentTransition(.numericText())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
 
             Text(unit)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
@@ -151,11 +183,11 @@ private struct Sparkline: View {
             ZStack {
                 // Fill under the curve.
                 Path { path in
-                    guard let first = points.first else { return }
+                    guard let first = points.first, let last = points.last else { return }
                     path.move(to: CGPoint(x: first.x, y: size.height))
                     path.addLine(to: first)
                     points.dropFirst().forEach { path.addLine(to: $0) }
-                    path.addLine(to: CGPoint(x: points[points.count - 1].x, y: size.height))
+                    path.addLine(to: CGPoint(x: last.x, y: size.height))
                     path.closeSubpath()
                 }
                 .fill(

@@ -8,56 +8,111 @@ import Testing
 @Suite("Telemetry payload")
 struct TelemetryPacketTests {
 
-    @Test("Round-trips through the binary encoding")
+    @Test("Round-trips every field through the binary encoding")
     func roundTrip() throws {
         let original = TelemetryPacket(
             timestamp: Date(timeIntervalSince1970: 1_767_225_600),
             heartRate: 142,
             steps: 12_345,
+            calories: 412.5,
+            distanceMeters: 6_240,
             batteryPercent: 87,
             isCharging: true,
             isOnWrist: true,
-            hasSensorContact: false
+            hasHeartRateSensor: false
         )
 
         let decoded = try TelemetryPacket(payload: original.encodedPayload())
 
         #expect(decoded.heartRate == 142)
         #expect(decoded.steps == 12_345)
+        #expect(decoded.calories == 412.5)
+        #expect(decoded.distanceMeters == 6_240)
         #expect(decoded.batteryPercent == 87)
         #expect(decoded.isCharging)
-        #expect(decoded.isOnWrist)
-        #expect(!decoded.hasSensorContact)
+        #expect(decoded.isOnWrist == true)
+        #expect(!decoded.hasHeartRateSensor)
         // Millisecond resolution on the wire, so compare within one.
         #expect(abs(decoded.timestamp.timeIntervalSince(original.timestamp)) < 0.001)
     }
 
-    @Test("Fits the default ATT payload without fragmenting")
-    func payloadFitsDefaultMTU() {
-        let frame = Frame(opcode: .telemetry, payload: TelemetryPacket.preview.encodedPayload())
-        // 20 bytes is the usable notification payload before MTU negotiation.
-        #expect(frame.encoded().count <= 20)
+    @Test("A sample no longer fits one unnegotiated notification")
+    func payloadExceedsDefaultMTU() {
+        let payload = TelemetryPacket.preview.encodedPayload()
+        #expect(payload.count == TelemetryPacket.payloadSize)
+
+        // 28 + 4 header. The default 23-byte ATT MTU allows only 20 bytes per
+        // notification, so delivery now depends on either MTU negotiation (iOS requests
+        // ~185 on connect) or FrameReassembler joining the fragments. Asserted rather
+        // than merely documented, because a future field pushing this past a negotiated
+        // MTU would be a real regression.
+        let frame = Frame(opcode: .telemetry, payload: payload)
+        #expect(frame.encoded().count == 32)
+        #expect(frame.encoded().count > 20)
+        #expect(frame.encoded().count < 185)
     }
 
     @Test("Wire value 0 for heart rate decodes as no reading, not zero BPM")
     func zeroHeartRateIsAbsent() throws {
-        let packet = TelemetryPacket(
-            timestamp: .now, heartRate: nil, steps: 0, batteryPercent: 50
-        )
+        let packet = TelemetryPacket(timestamp: .now, heartRate: nil, steps: 0)
         let decoded = try TelemetryPacket(payload: packet.encodedPayload())
         #expect(decoded.heartRate == nil)
         #expect(decoded.heartRateText == "—")
+        // Zero steps must survive as zero — it is a real reading, unlike a zero BPM.
+        #expect(decoded.steps == 0)
+    }
+
+    @Test("Absent numeric fields use sentinels, not zero")
+    func sentinelsDecodeAsNil() throws {
+        let packet = TelemetryPacket(
+            timestamp: .now,
+            heartRate: nil,
+            steps: nil,
+            calories: nil,
+            distanceMeters: nil,
+            batteryPercent: nil,
+            isOnWrist: nil
+        )
+        let decoded = try TelemetryPacket(payload: packet.encodedPayload())
+
+        #expect(decoded.heartRate == nil)
+        #expect(decoded.steps == nil)
+        #expect(decoded.calories == nil)
+        #expect(decoded.distanceMeters == nil)
+        #expect(decoded.batteryPercent == nil)
+        // nil means "no off-body sensor", which must stay distinct from false.
+        #expect(decoded.isOnWrist == nil)
+        #expect(decoded.stepsText == "—")
+        #expect(decoded.batteryText == "—")
+    }
+
+    @Test("Zero battery is a reading, not an absent value")
+    func zeroBatteryIsReal() throws {
+        let packet = TelemetryPacket(timestamp: .now, batteryPercent: 0)
+        let decoded = try TelemetryPacket(payload: packet.encodedPayload())
+        #expect(decoded.batteryPercent == 0)
+        #expect(decoded.batteryText == "0%")
+    }
+
+    @Test("Calories keep one decimal place")
+    func caloriePrecision() throws {
+        let packet = TelemetryPacket(timestamp: .now, calories: 1234.7)
+        let decoded = try TelemetryPacket(payload: packet.encodedPayload())
+        #expect(decoded.calories == 1234.7)
     }
 
     @Test("Out-of-range battery is clamped rather than rejected")
     func batteryClamps() throws {
-        // A firmware bug reporting >100% should degrade the display, not kill the stream.
+        // A firmware bug reporting 120% should degrade the display, not kill the stream.
         var writer = ByteWriter()
         writer.u64(UInt64(Date.now.timeIntervalSince1970 * 1000))
         writer.u16(70)
         writer.u32(100)
-        writer.u8(255)
+        writer.u32(0)
+        writer.u32(0)
+        writer.u8(120)
         writer.u8(0)
+        writer.u32(0)
 
         let decoded = try TelemetryPacket(payload: writer.data)
         #expect(decoded.batteryPercent == 100)
@@ -70,19 +125,24 @@ struct TelemetryPacketTests {
         }
     }
 
-    @Test("Flag bits are independent")
+    @Test("Flag bits are independent, including the on-wrist tri-state")
     func flagsAreIndependent() throws {
         for charging in [true, false] {
-            for onWrist in [true, false] {
-                for contact in [true, false] {
+            for onWrist in [true, false, nil] {
+                for hasSensor in [true, false] {
                     let packet = TelemetryPacket(
-                        timestamp: .now, heartRate: 60, steps: 1, batteryPercent: 1,
-                        isCharging: charging, isOnWrist: onWrist, hasSensorContact: contact
+                        timestamp: .now,
+                        heartRate: 60,
+                        steps: 1,
+                        batteryPercent: 1,
+                        isCharging: charging,
+                        isOnWrist: onWrist,
+                        hasHeartRateSensor: hasSensor
                     )
                     let decoded = try TelemetryPacket(payload: packet.encodedPayload())
                     #expect(decoded.isCharging == charging)
                     #expect(decoded.isOnWrist == onWrist)
-                    #expect(decoded.hasSensorContact == contact)
+                    #expect(decoded.hasHeartRateSensor == hasSensor)
                 }
             }
         }

@@ -126,6 +126,8 @@ class GattServerService : LifecycleService() {
     private var gattServer: BluetoothGattServer? = null
     private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
 
+    private val sensors by lazy { SensorRepository(this) }
+
     /** Centrals that wrote 0x0001 to the CCCD. Only these receive notifications. */
     private val subscribers = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
 
@@ -167,12 +169,18 @@ class GattServerService : LifecycleService() {
         if (!startGattServer()) return START_NOT_STICKY
         startAdvertising()
 
+        // Daily totals and the off-body sensor only. Heart rate is started separately,
+        // when a phone actually subscribes — registering it powers the optical sensor,
+        // which is the biggest battery draw in this app.
+        sensors.start()
+
         _state.update { it.copy(isRunning = true, error = null, lastEvent = "Server open") }
         return START_STICKY
     }
 
     override fun onDestroy() {
         stopStreaming()
+        sensors.stop()
         stopAdvertising()
         gattServer?.close()
         gattServer = null
@@ -290,7 +298,11 @@ class GattServerService : LifecycleService() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothGatt.STATE_DISCONNECTED) {
                 subscribers.remove(device)
-                if (subscribers.isEmpty()) stopStreaming()
+                if (subscribers.isEmpty()) {
+                    stopStreaming()
+                    // Power the optical sensor back down; nobody is listening.
+                    sensors.stopHeartRate()
+                }
                 Log.i(TAG, "Central disconnected; ${subscribers.size} subscriber(s) remain")
                 publish("Central disconnected")
             } else {
@@ -313,7 +325,8 @@ class GattServerService : LifecycleService() {
                 return
             }
 
-            val json = """{"model":"${Build.MODEL}","sdk":${Build.VERSION.SDK_INT},"protocol":1}"""
+            // protocol 2 = the 28-byte telemetry payload with calories and distance.
+            val json = """{"model":"${Build.MODEL}","sdk":${Build.VERSION.SDK_INT},"protocol":2}"""
             val bytes = json.toByteArray(Charsets.UTF_8)
 
             // A long value arrives as several offset reads; serve the requested slice or
@@ -365,7 +378,14 @@ class GattServerService : LifecycleService() {
                 val enabled = value.size >= 2 && value[0].toInt() == 0x01
                 if (enabled) subscribers.add(device) else subscribers.remove(device)
                 Log.i(TAG, "Notifications ${if (enabled) "enabled" else "disabled"} for ${device.address}")
-                if (!enabled && subscribers.isEmpty()) stopStreaming()
+
+                if (enabled) {
+                    // A phone is listening, so it is worth powering the optical sensor.
+                    sensors.startHeartRate()
+                } else if (subscribers.isEmpty()) {
+                    stopStreaming()
+                    sensors.stopHeartRate()
+                }
                 publish(if (enabled) "Phone subscribed" else "Phone unsubscribed")
             }
             if (responseNeeded) {
@@ -508,55 +528,81 @@ class GattServerService : LifecycleService() {
     // MARK: - Sensors
 
     /**
-     * One telemetry sample, encoded to the 16-byte layout documented in
-     * `TelemetryPacket.swift`.
+     * One telemetry sample, encoded to the 28-byte layout documented in
+     * `TelemetryPacket.swift`. Keep the two in lockstep — there is no shared schema, so a
+     * field added on one side and not the other decodes as garbage rather than failing.
+     *
+     * Nullable fields carry a sentinel rather than zero, because zero is legitimate for
+     * most of them: 0 steps at 6am is real data. Heart rate is the exception — a live
+     * 0 BPM is not something this device reports, so 0 doubles as its sentinel.
      */
     data class Sample(
         val epochMillis: Long,
-        val heartRate: Int,
-        val steps: Int,
-        val batteryPercent: Int,
+        val heartRate: Int?,
+        val steps: Int?,
+        val calories: Double?,
+        val distanceMeters: Double?,
+        val batteryPercent: Int?,
         val isCharging: Boolean,
-        val isOnWrist: Boolean,
-        val hasSensorContact: Boolean
+        val isOnWrist: Boolean?,
+        val hasHeartRateSensor: Boolean,
     ) {
+        companion object {
+            const val PAYLOAD_SIZE = 28
+
+            /** 0xFFFFFFFF. Written as -1 because Kotlin has no unsigned Int literal here. */
+            private const val ABSENT_32 = -1
+            private const val ABSENT_BATTERY = 0xFF
+        }
+
         fun encode(): ByteArray {
             var flags = 0
-            if (isCharging) flags = flags or 0b001
-            if (isOnWrist) flags = flags or 0b010
-            if (hasSensorContact) flags = flags or 0b100
+            if (isCharging) flags = flags or 0b0001
+            isOnWrist?.let { onWrist ->
+                // bit2 marks the reading as known at all, so the phone can tell "off
+                // wrist" apart from "this watch has no off-body sensor".
+                flags = flags or 0b0100
+                if (onWrist) flags = flags or 0b0010
+            }
+            if (hasHeartRateSensor) flags = flags or 0b1000
 
-            return ByteBuffer.allocate(16)
+            return ByteBuffer.allocate(PAYLOAD_SIZE)
                 .order(ByteOrder.LITTLE_ENDIAN)
                 .putLong(epochMillis)
-                .putShort(heartRate.coerceIn(0, 65535).toShort())
-                .putInt(steps.coerceAtLeast(0))
-                .put(batteryPercent.coerceIn(0, 100).toByte())
+                .putShort((heartRate ?: 0).coerceIn(0, 65535).toShort())
+                .putInt(steps?.coerceAtLeast(0) ?: ABSENT_32)
+                .putInt(calories?.let { (it * 10).toInt().coerceAtLeast(0) } ?: ABSENT_32)
+                .putInt(distanceMeters?.let { it.toInt().coerceAtLeast(0) } ?: ABSENT_32)
+                .put((batteryPercent?.coerceIn(0, 100) ?: ABSENT_BATTERY).toByte())
                 .put(flags.toByte())
+                .putInt(0) // reserved
                 .array()
         }
     }
 
     /**
-     * Placeholder sensor read — synthetic values, so the link can be validated before any
-     * sensor plumbing exists.
+     * Snapshots whatever [SensorRepository] currently holds.
      *
-     * Replace with real sources:
-     *  - Heart rate / steps: Health Services (`androidx.health.services.client`), the
-     *    Wear OS-sanctioned API; handles batching and power management. Needs BODY_SENSORS
-     *    and ACTIVITY_RECOGNITION.
-     *  - Battery: `registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))`.
-     *  - On-wrist: `Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT` via SensorManager.
+     * Deliberately non-blocking: it reads the latest cached values rather than waiting for
+     * a fresh sample. Heart rate arrives asynchronously at the sensor's own cadence, and
+     * blocking the stream loop on it would couple the telemetry interval to sensor timing.
+     * A field with no reading yet goes out as its sentinel and the phone renders "—".
      */
-    private fun readSensors(): Sample = Sample(
-        epochMillis = System.currentTimeMillis(),
-        heartRate = (60..100).random(),
-        steps = 8_000 + (0..500).random(),
-        batteryPercent = 64,
-        isCharging = false,
-        isOnWrist = true,
-        hasSensorContact = true
-    )
+    private fun readSensors(): Sample {
+        sensors.refreshBattery()
+        val r = sensors.readings.value
+        return Sample(
+            epochMillis = System.currentTimeMillis(),
+            heartRate = r.heartRate,
+            steps = r.stepsToday,
+            calories = r.caloriesToday,
+            distanceMeters = r.distanceTodayMeters,
+            batteryPercent = r.batteryPercent,
+            isCharging = r.isCharging,
+            isOnWrist = r.isOnWrist,
+            hasHeartRateSensor = r.heartRateAvailable,
+        )
+    }
 
     private fun vibrate(durationMs: Long) {
         Log.i(TAG, "Vibrate ${durationMs}ms")

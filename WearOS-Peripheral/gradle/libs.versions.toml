@@ -14,6 +14,7 @@ lifecycleRuntime = "2.8.7"
 activityCompose = "1.9.3"
 composeBom = "2024.12.01"
 wearCompose = "1.4.0"
+healthServices = "1.0.0-beta03"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -31,6 +32,11 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 # watch's own interaction idioms.
 androidx-wear-compose-material = { group = "androidx.wear.compose", name = "compose-material", version.ref = "wearCompose" }
 androidx-wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearCompose" }
+
+# Health Services is the Wear OS-sanctioned path to heart rate, steps, calories and
+# distance. Preferred over raw SensorManager because it batches, manages sensor power, and
+# because Samsung restricts direct TYPE_HEART_RATE access on Galaxy Watch.
+androidx-health-services = { group = "androidx.health", name = "health-services-client", version.ref = "healthServices" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
