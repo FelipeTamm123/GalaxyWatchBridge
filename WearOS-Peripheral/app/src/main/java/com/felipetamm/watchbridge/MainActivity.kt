@@ -132,10 +132,16 @@ private fun BridgeApp() {
                         item {
                             StatusBlock(
                                 lines = buildList {
-                                    add(
+                                    // Split into locals rather than inlining the two
+                                    // conditionals around `to`: an if/else expression is
+                                    // greedy, so the else branch swallows the infix `to`
+                                    // and the whole thing types as Serializable.
+                                    val advertisingLabel =
                                         if (state.isAdvertising) "Advertising" else "Not advertising"
-                                                to if (state.isAdvertising) Color(0xFF6BCB77) else Color.Gray
-                                    )
+                                    val advertisingColor =
+                                        if (state.isAdvertising) Color(0xFF6BCB77) else Color.Gray
+                                    add(advertisingLabel to advertisingColor)
+
                                     add("Subscribers: ${state.subscriberCount}" to Color.LightGray)
                                     if (state.isStreaming) {
                                         add("Streaming · ${state.packetsSent} pkts" to Color(0xFF4D96FF))
