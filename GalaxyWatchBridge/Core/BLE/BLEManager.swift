@@ -400,14 +400,16 @@ final class BLEManager: NSObject, @unchecked Sendable {
             // reconnect, and this *is* that reconnect — leaving the reference in place
             // means `connect` cancels the very task awaiting it, so `establishLink` throws
             // `.cancelled` and the link can never recover.
-            await self.onQueue { [self] in reconnectTask = nil }
+            // `self.` is spelled out throughout this Task: a `[self]` capture list does not
+            // re-enable implicit self once `self` has been rebound by `guard let self`.
+            await self.onQueue { self.reconnectTask = nil }
 
             do {
                 try await self.connect(to: id)
             } catch {
-                self.queue.async { [self] in
-                    guard !isIntentionalDisconnect else { return }
-                    scheduleReconnect(to: id, attempt: attempt + 1)
+                self.queue.async {
+                    guard !self.isIntentionalDisconnect else { return }
+                    self.scheduleReconnect(to: id, attempt: attempt + 1)
                 }
             }
         }
@@ -670,7 +672,9 @@ extension BLEManager: CBPeripheralDelegate {
 
         if let error {
             log(.error, "Notify enable failed: \(error.localizedDescription)")
-            operation.fail(.subscribeFailed(error.localizedDescription))
+            // Spelled out because `fail` takes `any Error`, so a leading dot has no base
+            // type to resolve against.
+            operation.fail(BLEError.subscribeFailed(error.localizedDescription))
         } else {
             log(.success, "Notifications \(characteristic.isNotifying ? "enabled" : "disabled") for \(characteristic.uuid)")
             operation.succeed()

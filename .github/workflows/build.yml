@@ -96,17 +96,28 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      # Printed so that if the destination below stops matching a real device, the log
-      # already tells us what to use instead.
-      - name: List available simulators
-        run: xcrun simctl list devices available
-
       - name: Run tests
         run: |
           set -o pipefail
+
+          # The simulator is chosen at runtime instead of hardcoding a device name. The
+          # runner image's simulator set changes with every Xcode update, and a name that
+          # no longer exists fails with the unhelpful "Unable to find a device matching the
+          # provided destination specifier". Selecting by UDID sidesteps naming entirely.
+          DEVICES=$(xcrun simctl list devices available -j)
+          SIM_ID=$(echo "$DEVICES" | jq -r '[.devices[][] | select(.name | startswith("iPhone"))] | .[0].udid // empty')
+          SIM_NAME=$(echo "$DEVICES" | jq -r '[.devices[][] | select(.name | startswith("iPhone"))] | .[0].name // empty')
+
+          if [ -z "$SIM_ID" ]; then
+            echo "::error::No iPhone simulator available on this runner"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Testing on $SIM_NAME ($SIM_ID)"
+
           xcodebuild test \
             -project GalaxyWatchBridge.xcodeproj \
             -scheme GalaxyWatchBridge \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -destination "platform=iOS Simulator,id=$SIM_ID" \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO
