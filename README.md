@@ -232,10 +232,24 @@ Deliberate omissions, so the gaps are visible rather than assumed:
   itself is untested — testing it means abstracting `CBCentralManager` behind a protocol
   and injecting a fake, which is worth doing before this grows.
 
-## Not verified
+## Build status
 
-These files have never been compiled. They were written on Windows, where there is no
-Swift toolchain and no Android SDK, so **expect to fix some compile errors on first
-build** — most likely around Swift 6 concurrency annotations, which vary by toolchain
-version. The logic and the protocol are the parts worth reviewing; the syntax is cheap to
-correct once Xcode can tell you where it disagrees.
+The iOS side **compiles and its tests pass** — 21 tests across 4 suites, run on CI against
+an iPhone 17 Pro simulator. `.github/workflows/build.yml` builds an unsigned `.ipa` on
+every push; download it from the run summary and re-sign locally with Sideloadly (the
+workflow deliberately holds no certificates, since this repo is public).
+
+Getting there took three CI runs, and two of the failures are worth knowing about:
+
+- **A green build job produced an uninstallable app.** With `GENERATE_INFOPLIST_FILE=NO`,
+  Xcode does not supply the bundle identity keys it would otherwise synthesise. A plist
+  missing `CFBundleIdentifier` compiles, packages into an `.ipa`, and raises no warning —
+  it fails only at install time with "Missing bundle ID". The simulator install in the
+  test job caught it; the device build had no way to notice.
+- **`armv7` in `UIRequiredDeviceCapabilities`** — old boilerplate that is now actively
+  harmful. Modern iPhones are arm64-only and do not report that capability, so iOS rejects
+  the install as incompatible.
+
+**Still unverified: everything requiring real hardware.** The app has not been run against
+an actual watch, so the GATT interaction — discovery, subscription, framing over a real
+MTU — is untested end-to-end. The Wear OS side has never been compiled at all.
