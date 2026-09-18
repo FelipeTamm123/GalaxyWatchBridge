@@ -56,3 +56,6 @@ captures/
 .vscode/
 *.swp
 *~
+
+# Downloaded CI artifacts and unpacked probes.
+artifacts/

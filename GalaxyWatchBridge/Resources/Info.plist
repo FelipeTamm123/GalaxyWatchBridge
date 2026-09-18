@@ -44,11 +44,43 @@
 	  BLE requires physical hardware. This prevents installation on devices without it and
 	  keeps the app off the Simulator, where CoreBluetooth reports .unsupported forever.
 	-->
+	<!--
+	  BLE requires physical hardware, so this keeps the app off devices without a radio.
+
+	  Do NOT add an architecture here. The old boilerplate `armv7` entry is actively
+	  harmful now: modern iPhones are arm64-only and do not report an armv7 capability, so
+	  iOS rejects the install as incompatible. The binary's own architecture already
+	  constrains where it can run.
+	-->
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
-		<string>armv7</string>
 		<string>bluetooth-le</string>
 	</array>
+
+	<!--
+	  Bundle identity. These MUST be here.
+
+	  With GENERATE_INFOPLIST_FILE=NO, Xcode injects only build-derived keys
+	  (MinimumOSVersion, DTPlatformName, …) and does NOT supply the identity keys the way
+	  it does for a synthesised plist. Omitting CFBundleIdentifier still builds and still
+	  packages into an .ipa without any warning — the app is simply uninstallable, failing
+	  with "Missing bundle ID" only at install time.
+
+	  The $(…) values are substituted from build settings during packaging, so the bundle
+	  ID stays defined in one place (project.yml) rather than duplicated here.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
 
 	<key>CFBundleDisplayName</key>
 	<string>Watch Bridge</string>
