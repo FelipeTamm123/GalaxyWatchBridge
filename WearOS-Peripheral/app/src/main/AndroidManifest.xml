@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      API 31+ granular Bluetooth permissions.
+
+      BLUETOOTH_ADVERTISE and BLUETOOTH_CONNECT must be REQUESTED AT RUNTIME. Declaring
+      them here is not sufficient, and the failure is silent: without the grant,
+      openGattServer() returns null and startAdvertising() never reports success.
+      MainActivity requests them before starting the service.
+
+      neverForLocation tells the system this app does not derive location from BLE, which
+      exempts it from needing ACCESS_FINE_LOCATION. Without that flag, advertising would
+      drag in the location permission too.
+    -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Foreground service. Required on API 34+, along with the typed permission below
+         matching the foregroundServiceType declared on the service element. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- API 33+: a foreground service notification is only visible with this granted, and
+         it is a runtime permission like the Bluetooth ones. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Needed only once readSensors() is wired to real hardware. Harmless until then. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+    <!-- Peripheral-role BLE is not universal hardware. Marking it required keeps the app
+         off devices that would install it and then never be able to advertise. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
+
+    <!-- Declares this as a watch app so the Play Store and launcher treat it correctly. -->
+    <uses-feature
+        android:name="android.hardware.type.watch"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_bridge"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <uses-library
+            android:name="com.google.android.wearable"
+            android:required="false" />
+
+        <!-- Wear OS standalone app: works without a paired phone, which is the whole
+             point here since the "phone" is an iPhone that cannot pair at all. -->
+        <meta-data
+            android:name="com.google.android.wearable.standalone"
+            android:value="true" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".GattServerService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+</manifest>

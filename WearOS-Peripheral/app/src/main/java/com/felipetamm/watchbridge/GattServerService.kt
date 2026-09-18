@@ -1,7 +1,10 @@
 package com.felipetamm.watchbridge
 
 import android.annotation.SuppressLint
-import android.app.Service
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -15,19 +18,27 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
+import android.os.VibrationEffect
+import android.os.VibratorManager
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.lifecycleScope
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Collections
 import java.util.UUID
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -36,32 +47,36 @@ import kotlinx.coroutines.launch
  *
  * ## Why this exists
  *
- * Galaxy Watch 4 and later run Wear OS 3+, which dropped iOS support entirely: there is no
- * Galaxy Wearable app for iPhone and no companion protocol to hook into. The only way an
- * iPhone can talk to one of these watches is to bypass the companion ecosystem and speak
- * raw BLE GATT — which means the watch has to act as the peripheral and expose a custom
- * service, because nothing suitable is exposed by default.
+ * Galaxy Watch 4 and later run Wear OS 3+, which dropped iOS support entirely: no Galaxy
+ * Wearable app for iPhone, no companion protocol to hook into. The only way an iPhone can
+ * talk to one of these watches is to bypass the companion ecosystem and speak raw BLE
+ * GATT — which means the watch must act as the peripheral and expose a custom service,
+ * because nothing suitable is exposed by default.
  *
- * That is what this service does. Run it on the watch, and the iOS app can discover,
- * connect, subscribe, and exchange framed packets.
+ * ## Constraints worth knowing before building on this
  *
- * ## Constraints worth knowing before you build on this
- *
- * - **Foreground only, realistically.** Wear OS aggressively suspends background work and
- *   BLE advertising is a battery sink. Keep the watch activity visible during development.
- * - **UUIDs must match byte-for-byte** with `BLEConstants.swift`. A mismatch presents as a
- *   watch that advertises but exposes no services — the most confusing possible failure.
+ * - **UUIDs must match `BLEConstants.swift` byte-for-byte.** A mismatch presents as a
+ *   watch that advertises but exposes no services — the most confusing failure here.
  * - **Little-endian everywhere.** `ByteBuffer` defaults to BIG_endian; Swift's integer
- *   loads are little-endian on ARM. Every buffer below sets the order explicitly. Getting
- *   this wrong yields plausible-looking garbage rather than an error.
+ *   loads are little-endian. Every buffer below sets the order explicitly. Getting this
+ *   wrong yields plausible-looking garbage rather than an error.
  * - **The CCCD descriptor is mandatory.** Without a Client Characteristic Configuration
- *   descriptor on the notify characteristic, iOS's `setNotifyValue(true:)` fails and no
+ *   descriptor on the notify characteristic, iOS `setNotifyValue(true:)` fails and no
  *   telemetry ever arrives.
+ * - **Foreground service, started promptly.** On API 34+ a service declaring
+ *   `foregroundServiceType` must call `startForeground()` within a few seconds of
+ *   starting, or the system kills it with `ForegroundServiceDidNotStartInTimeException`.
+ *   That happens first thing in [onStartCommand], before any Bluetooth work.
  */
-class GattServerService : Service() {
+class GattServerService : LifecycleService() {
 
     companion object {
         private const val TAG = "GattServerService"
+
+        private const val CHANNEL_ID = "ble_bridge"
+        private const val NOTIFICATION_ID = 1
+
+        const val ACTION_STOP = "com.felipetamm.watchbridge.STOP"
 
         // Must match BLEConstants.swift exactly.
         val SERVICE_UUID: UUID = UUID.fromString("8E7C0001-4B2A-4E1F-9C3D-5A6B7C8D9E0F")
@@ -69,7 +84,7 @@ class GattServerService : Service() {
         val COMMAND_UUID: UUID = UUID.fromString("8E7C0003-4B2A-4E1F-9C3D-5A6B7C8D9E0F")
         val DEVICE_INFO_UUID: UUID = UUID.fromString("8E7C0004-4B2A-4E1F-9C3D-5A6B7C8D9E0F")
 
-        /** Client Characteristic Configuration Descriptor — the SIG-assigned 0x2902. */
+        /** Client Characteristic Configuration Descriptor — SIG-assigned 0x2902. */
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
         // Opcodes — mirror of the Swift `Opcode` enum.
@@ -84,46 +99,149 @@ class GattServerService : Service() {
         private const val FRAME_HEADER_SIZE = 4
         private const val MIN_STREAM_INTERVAL_MS = 200L
         private const val MAX_STREAM_INTERVAL_MS = 60_000L
+
+        /**
+         * Observable state for the watch UI.
+         *
+         * Lives in the companion object so the Activity can read it without binding to the
+         * service. Same reasoning as the iOS side's log console: BLE failures are silent,
+         * so showing the actual state is the only way to tell "not advertising" apart from
+         * "advertising but the phone never subscribed".
+         */
+        private val _state = MutableStateFlow(ServerState())
+        val state: StateFlow<ServerState> = _state.asStateFlow()
     }
+
+    data class ServerState(
+        val isRunning: Boolean = false,
+        val isAdvertising: Boolean = false,
+        val subscriberCount: Int = 0,
+        val isStreaming: Boolean = false,
+        val packetsSent: Int = 0,
+        val lastEvent: String = "Idle",
+        val error: String? = null,
+    )
 
     private lateinit var bluetoothManager: BluetoothManager
     private var gattServer: BluetoothGattServer? = null
     private var telemetryCharacteristic: BluetoothGattCharacteristic? = null
 
-    /** Centrals that have written 0x0001 to the CCCD. Only these receive notifications. */
+    /** Centrals that wrote 0x0001 to the CCCD. Only these receive notifications. */
     private val subscribers = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
 
-    private val scope = CoroutineScope(SupervisorJob())
     private var streamJob: Job? = null
     private var sequence = 0
 
     // MARK: - Lifecycle
 
-    override fun onCreate() {
-        super.onCreate()
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // First, before anything that could throw or block. On API 34+ the system gives a
+        // typed foreground service only a few seconds to post its notification.
+        createNotificationChannel()
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            buildNotification("Starting…"),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            } else {
+                0
+            }
+        )
+
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        startGattServer()
+
+        val adapter = bluetoothManager.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            fail("Bluetooth is off")
+            return START_NOT_STICKY
+        }
+
+        if (!startGattServer()) return START_NOT_STICKY
         startAdvertising()
+
+        _state.update { it.copy(isRunning = true, error = null, lastEvent = "Server open") }
+        return START_STICKY
     }
 
     override fun onDestroy() {
+        stopStreaming()
         stopAdvertising()
         gattServer?.close()
         gattServer = null
-        scope.cancel()
+        subscribers.clear()
+        _state.update {
+            ServerState(lastEvent = "Stopped")
+        }
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent): IBinder? {
+        super.onBind(intent)
+        return null
+    }
+
+    private fun fail(message: String) {
+        Log.e(TAG, message)
+        _state.update { it.copy(isRunning = false, error = message, lastEvent = message) }
+        stopSelf()
+    }
+
+    // MARK: - Notification
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.notification_channel_name),
+            // LOW keeps it silent: this is a status indicator, not an alert.
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = getString(R.string.notification_channel_description)
+            setShowBadge(false)
+        }
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+    }
+
+    private fun buildNotification(text: String): Notification {
+        val stopIntent = PendingIntent.getService(
+            this,
+            0,
+            Intent(this, GattServerService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_bridge)
+            .setOngoing(true)
+            .setSilent(true)
+            .addAction(0, "Stop", stopIntent)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIFICATION_ID, buildNotification(text))
+    }
 
     // MARK: - GATT server
 
-    @SuppressLint("MissingPermission") // Caller must hold BLUETOOTH_CONNECT (API 31+).
-    private fun startGattServer() {
+    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT checked by MainActivity.
+    private fun startGattServer(): Boolean {
         val server = bluetoothManager.openGattServer(this, serverCallback)
         if (server == null) {
-            Log.e(TAG, "openGattServer returned null — is Bluetooth enabled?")
-            return
+            // Almost always a missing BLUETOOTH_CONNECT grant rather than a real fault.
+            fail("openGattServer failed — check Bluetooth permissions")
+            return false
         }
         gattServer = server
 
@@ -133,9 +251,8 @@ class GattServerService : Service() {
         val telemetry = BluetoothGattCharacteristic(
             TELEMETRY_UUID,
             BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            0 // No read/write permission needed for a notify-only characteristic.
+            0 // A notify-only characteristic needs no read/write permission.
         ).apply {
-            // Without this descriptor, iOS setNotifyValue(true:) fails silently.
             addDescriptor(
                 BluetoothGattDescriptor(
                     CCCD_UUID,
@@ -146,7 +263,7 @@ class GattServerService : Service() {
         telemetryCharacteristic = telemetry
         service.addCharacteristic(telemetry)
 
-        // Phone -> watch. WRITE (acknowledged) so the iOS side gets a confirmation.
+        // Phone -> watch. WRITE (acknowledged) so iOS gets a confirmation.
         service.addCharacteristic(
             BluetoothGattCharacteristic(
                 COMMAND_UUID,
@@ -165,6 +282,7 @@ class GattServerService : Service() {
 
         server.addService(service)
         Log.i(TAG, "GATT server open with service $SERVICE_UUID")
+        return true
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
@@ -174,8 +292,10 @@ class GattServerService : Service() {
                 subscribers.remove(device)
                 if (subscribers.isEmpty()) stopStreaming()
                 Log.i(TAG, "Central disconnected; ${subscribers.size} subscriber(s) remain")
+                publish("Central disconnected")
             } else {
                 Log.i(TAG, "Central connected: ${device.address}")
+                publish("Central connected")
             }
         }
 
@@ -221,13 +341,13 @@ class GattServerService : Service() {
                 return
             }
 
-            // Respond before doing any work: iOS is waiting on didWriteValueFor, and a
-            // slow handler here shows up there as a write timeout.
+            // Respond BEFORE doing any work: iOS is waiting on didWriteValueFor, and a slow
+            // handler here surfaces there as a write timeout.
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
 
-            handleCommandFrame(device, value)
+            handleCommandFrame(value)
         }
 
         @SuppressLint("MissingPermission")
@@ -241,11 +361,12 @@ class GattServerService : Service() {
             value: ByteArray
         ) {
             if (descriptor.uuid == CCCD_UUID) {
-                // 0x0001 = notifications on, 0x0002 = indications, 0x0000 = off.
+                // 0x0001 = notifications, 0x0002 = indications, 0x0000 = off.
                 val enabled = value.size >= 2 && value[0].toInt() == 0x01
                 if (enabled) subscribers.add(device) else subscribers.remove(device)
                 Log.i(TAG, "Notifications ${if (enabled) "enabled" else "disabled"} for ${device.address}")
                 if (!enabled && subscribers.isEmpty()) stopStreaming()
+                publish(if (enabled) "Phone subscribed" else "Phone unsubscribed")
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -254,12 +375,13 @@ class GattServerService : Service() {
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             Log.i(TAG, "MTU negotiated: $mtu bytes")
+            publish("MTU $mtu")
         }
     }
 
     // MARK: - Command handling
 
-    private fun handleCommandFrame(device: BluetoothDevice, raw: ByteArray) {
+    private fun handleCommandFrame(raw: ByteArray) {
         if (raw.size < FRAME_HEADER_SIZE) {
             Log.w(TAG, "Runt frame: ${raw.size} bytes")
             return
@@ -278,33 +400,25 @@ class GattServerService : Service() {
 
         when (opcode) {
             OP_START_STREAM -> {
-                val requested = if (payload.size >= 2) {
-                    (ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF).toLong()
-                } else {
-                    1000L
-                }
-                val interval = requested.coerceIn(MIN_STREAM_INTERVAL_MS, MAX_STREAM_INTERVAL_MS)
-                startStreaming(interval)
+                val requested = readUInt16(payload) ?: 1000L
+                startStreaming(requested.coerceIn(MIN_STREAM_INTERVAL_MS, MAX_STREAM_INTERVAL_MS))
                 sendAck(seq)
             }
 
             OP_STOP_STREAM -> {
                 stopStreaming()
+                publish("Stream stopped")
                 sendAck(seq)
             }
 
             OP_REQUEST_SAMPLE -> {
-                scope.launch { notifyTelemetry(readSensors()) }
+                lifecycleScope.launch { notifyTelemetry(readSensors()) }
+                publish("Sample requested")
                 sendAck(seq)
             }
 
             OP_VIBRATE -> {
-                val ms = if (payload.size >= 2) {
-                    (ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF).toLong()
-                } else {
-                    300L
-                }
-                vibrate(ms)
+                vibrate(readUInt16(payload) ?: 300L)
                 sendAck(seq)
             }
 
@@ -315,22 +429,34 @@ class GattServerService : Service() {
         }
     }
 
+    private fun readUInt16(payload: ByteArray): Long? =
+        if (payload.size >= 2) {
+            (ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF).toLong()
+        } else {
+            null
+        }
+
     // MARK: - Streaming
 
     private fun startStreaming(intervalMs: Long) {
         stopStreaming()
         Log.i(TAG, "Streaming every ${intervalMs}ms")
-        streamJob = scope.launch {
+        _state.update { it.copy(isStreaming = true, lastEvent = "Streaming @ ${intervalMs}ms") }
+        updateNotification("Streaming every ${intervalMs}ms")
+
+        streamJob = lifecycleScope.launch {
             while (isActive && subscribers.isNotEmpty()) {
                 notifyTelemetry(readSensors())
                 delay(intervalMs)
             }
+            _state.update { it.copy(isStreaming = false) }
         }
     }
 
     private fun stopStreaming() {
         streamJob?.cancel()
         streamJob = null
+        _state.update { it.copy(isStreaming = false) }
     }
 
     // MARK: - Frame emission
@@ -348,7 +474,7 @@ class GattServerService : Service() {
             .put(payload)
             .array()
 
-        // Copy the set before iterating: onConnectionStateChange can mutate it from
+        // Snapshot before iterating: onConnectionStateChange can mutate the set from
         // another thread mid-loop.
         val targets = synchronized(subscribers) { subscribers.toList() }
         for (device in targets) {
@@ -361,6 +487,10 @@ class GattServerService : Service() {
                 server.notifyCharacteristicChanged(device, characteristic, false)
             }
         }
+
+        if (opcode == OP_TELEMETRY && targets.isNotEmpty()) {
+            _state.update { it.copy(packetsSent = it.packetsSent + 1) }
+        }
     }
 
     private fun notifyTelemetry(sample: Sample) = notify(OP_TELEMETRY, sample.encode())
@@ -368,6 +498,12 @@ class GattServerService : Service() {
     private fun sendAck(sequence: Byte) = notify(OP_ACK, byteArrayOf(sequence))
 
     private fun sendError(message: String) = notify(OP_ERROR, message.toByteArray(Charsets.UTF_8))
+
+    private fun publish(event: String) {
+        _state.update {
+            it.copy(subscriberCount = subscribers.size, lastEvent = event)
+        }
+    }
 
     // MARK: - Sensors
 
@@ -402,12 +538,13 @@ class GattServerService : Service() {
     }
 
     /**
-     * Placeholder sensor read.
+     * Placeholder sensor read — synthetic values, so the link can be validated before any
+     * sensor plumbing exists.
      *
      * Replace with real sources:
-     *  - Heart rate / steps: Health Services (`androidx.health.services.client`), which is
-     *    the Wear OS-sanctioned API and handles batching and power management. Requires
-     *    the BODY_SENSORS and ACTIVITY_RECOGNITION permissions.
+     *  - Heart rate / steps: Health Services (`androidx.health.services.client`), the
+     *    Wear OS-sanctioned API; handles batching and power management. Needs BODY_SENSORS
+     *    and ACTIVITY_RECOGNITION.
      *  - Battery: `registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))`.
      *  - On-wrist: `Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT` via SensorManager.
      */
@@ -423,16 +560,24 @@ class GattServerService : Service() {
 
     private fun vibrate(durationMs: Long) {
         Log.i(TAG, "Vibrate ${durationMs}ms")
-        // Wire up VibratorManager (API 31+) or Vibrator here.
+        publish("Buzzed ${durationMs}ms")
+
+        val manager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager ?: return
+        manager.defaultVibrator.vibrate(
+            VibrationEffect.createOneShot(
+                durationMs.coerceIn(50, 2000),
+                VibrationEffect.DEFAULT_AMPLITUDE
+            )
+        )
     }
 
     // MARK: - Advertising
 
-    @SuppressLint("MissingPermission") // Caller must hold BLUETOOTH_ADVERTISE (API 31+).
+    @SuppressLint("MissingPermission") // BLUETOOTH_ADVERTISE checked by MainActivity.
     private fun startAdvertising() {
         val advertiser = bluetoothManager.adapter?.bluetoothLeAdvertiser
         if (advertiser == null) {
-            Log.e(TAG, "No BLE advertiser — peripheral role unsupported or Bluetooth is off")
+            fail("No BLE advertiser — peripheral role unsupported")
             return
         }
 
@@ -443,11 +588,11 @@ class GattServerService : Service() {
             .setTimeout(0) // Advertise until explicitly stopped.
             .build()
 
-        // The service UUID must be in the advertisement, not just the GATT table — the
-        // iOS side runs a filtered scan and will never see the watch without it.
+        // The service UUID must be in the ADVERTISEMENT, not just the GATT table — the iOS
+        // side runs a filtered scan and will never see the watch without it.
         //
-        // A 128-bit UUID consumes 16 of the 31-byte advertisement budget, which is why the
-        // device name is pushed into the scan response rather than the primary packet.
+        // A 128-bit UUID eats 16 of the 31-byte advertisement budget, which is why the
+        // device name goes in the scan response instead of the primary packet.
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
@@ -463,16 +608,19 @@ class GattServerService : Service() {
     @SuppressLint("MissingPermission")
     private fun stopAdvertising() {
         bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+        _state.update { it.copy(isAdvertising = false) }
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             Log.i(TAG, "Advertising started")
+            _state.update { it.copy(isAdvertising = true, lastEvent = "Advertising") }
+            updateNotification("Advertising — waiting for phone")
         }
 
         override fun onStartFailure(errorCode: Int) {
             val reason = when (errorCode) {
-                ADVERTISE_FAILED_DATA_TOO_LARGE -> "advertisement payload exceeds 31 bytes"
+                ADVERTISE_FAILED_DATA_TOO_LARGE -> "advertisement exceeds 31 bytes"
                 ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "too many advertisers"
                 ADVERTISE_FAILED_ALREADY_STARTED -> "already advertising"
                 ADVERTISE_FAILED_INTERNAL_ERROR -> "internal error"
@@ -480,6 +628,9 @@ class GattServerService : Service() {
                 else -> "code $errorCode"
             }
             Log.e(TAG, "Advertising failed: $reason")
+            _state.update {
+                it.copy(isAdvertising = false, error = reason, lastEvent = "Advertising failed")
+            }
         }
     }
 }

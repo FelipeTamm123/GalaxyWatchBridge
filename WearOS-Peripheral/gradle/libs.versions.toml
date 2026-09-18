@@ -1,0 +1,40 @@
+# Gradle version catalog.
+#
+# Versions are pinned to a known-good, mutually compatible set rather than the newest of
+# each. Android Studio will offer upgrades on first sync — accepting them is fine, but do
+# it one at a time: AGP, Kotlin and the Compose compiler plugin are version-locked to each
+# other, and a mismatched trio produces errors that point at your code rather than at the
+# real cause.
+
+[versions]
+agp = "8.7.3"
+kotlin = "2.0.21"
+coreKtx = "1.15.0"
+lifecycleRuntime = "2.8.7"
+activityCompose = "1.9.3"
+composeBom = "2024.12.01"
+wearCompose = "1.4.0"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntime" }
+androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycleRuntime" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+
+# The BOM aligns every Compose artifact, so those get no explicit version.
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+
+# Wear-specific Material. Not the phone Material3: this handles round screens and the
+# watch's own interaction idioms.
+androidx-wear-compose-material = { group = "androidx.wear.compose", name = "compose-material", version.ref = "wearCompose" }
+androidx-wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearCompose" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+# Required from Kotlin 2.0 on: the Compose compiler ships as its own plugin, versioned
+# with Kotlin rather than separately.
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

@@ -184,14 +184,35 @@ On iOS 16+, enable **Settings → Privacy & Security → Developer Mode** on the
 
 ### Wear OS
 
-1. New Android Studio project, **Wear OS** template, Kotlin.
-2. Add `GattServerService.kt`, fixing the package name.
-3. Merge `AndroidManifest-snippet.xml`.
-4. **Request `BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` at runtime** before starting
-   the service. Declaring them in the manifest is not sufficient on API 31+ — without the
-   grant, `openGattServer` returns `null` and advertising fails silently.
-5. Start the service and keep the watch app in the foreground. Wear OS suspends background
-   work aggressively.
+`WearOS-Peripheral/` is a complete Gradle project. Unlike the iOS half, this one builds on
+Windows, Linux or macOS — Android Studio runs everywhere.
+
+1. Android Studio → **Open** → select `WearOS-Peripheral/`. It will offer to create the
+   Gradle wrapper (the `.jar` is not committed) and to upgrade AGP/Kotlin — accepting is
+   fine, but upgrade one at a time: AGP, Kotlin and the Compose compiler plugin are
+   version-locked to each other.
+2. Pair the watch for debugging: on the watch, Settings → Developer options → **Wireless
+   debugging**, then `adb pair <ip>:<port>` and `adb connect <ip>:<port>` from the machine.
+   (Galaxy Watch models have no usable USB data port, so wireless is the only route.)
+3. Run the `app` configuration.
+4. On the watch: tap **Grant permissions**, then **Start server**.
+
+The UI is a status readout by design — advertising state, subscriber count, packets sent.
+Same reasoning as the iOS log console: a peripheral that is not advertising and one that is
+advertising but was never subscribed to look identical from the phone side.
+
+Two things that break this silently if missed:
+
+- **`BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` are runtime permissions on API 31+.**
+  Declaring them in the manifest is not enough. Without the grant, `openGattServer()`
+  returns `null` and `startAdvertising()` never reports success — no exception, nothing in
+  the log. `MainActivity` requests them before the service starts.
+- **A typed foreground service must call `startForeground()` within seconds** on API 34+,
+  or the system kills it with `ForegroundServiceDidNotStartInTimeException`. The service
+  posts its notification before touching Bluetooth at all.
+
+Keep the watch app in the foreground while testing; Wear OS suspends background work
+aggressively.
 
 ### Changing the UUIDs
 

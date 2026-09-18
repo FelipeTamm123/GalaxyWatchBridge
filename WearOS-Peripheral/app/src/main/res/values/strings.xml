@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Watch Bridge</string>
+    <string name="notification_channel_name">BLE Bridge</string>
+    <string name="notification_channel_description">Shown while the watch is advertising to the phone.</string>
+    <string name="notification_title">Watch Bridge active</string>
+    <string name="notification_text">Advertising over Bluetooth LE</string>
+</resources>
