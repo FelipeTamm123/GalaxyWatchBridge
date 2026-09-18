@@ -27,6 +27,14 @@
          it is a runtime permission like the Bluetooth ones. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      Needed for the vibrate command. VIBRATE is a "normal" permission — granted at
+      install with no dialog — but it still has to be DECLARED. Without this line,
+      Vibrator.vibrate() does nothing and raises no exception: the frame arrives, the
+      watch parses it, the handler runs, and the device stays still.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <!-- Needed only once readSensors() is wired to real hardware. Harmless until then. -->
     <uses-permission android:name="android.permission.BODY_SENSORS" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
